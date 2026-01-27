@@ -85,7 +85,7 @@ jobs:
         retention-days: 30
 
     - name: Sign Apk files
-      if: ${{ github.event_name == 'release'}}
+      if: ${{ github.event_name == 'release' || github.event_name == 'pull_request' }}
       uses: r0adkll/sign-android-release@v1.0.4
       with:
         releaseDirectory: android/app/build/outputs/apk/release
@@ -98,7 +98,7 @@ jobs:
         BUILD_TOOLS_VERSION: "34.0.0"
 
     - name: Upload signed APK as artifact
-      if: ${{ github.event_name == 'release' }}
+      if: ${{ github.event_name == 'release' || github.event_name == 'pull_request' }}
       uses: actions/upload-artifact@v4
       with:
         name: signed-apk
