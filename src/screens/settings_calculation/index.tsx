@@ -10,6 +10,8 @@ import {
   Input,
   HStack,
   VStack,
+  Spinner,
+  Box,
 } from 'native-base';
 import {useCallback, useMemo, useState} from 'react';
 import {useStore} from 'zustand';
@@ -23,6 +25,11 @@ import {SafeArea} from '@/components/safe_area';
 import {push} from '@/navigation/root_navigation';
 import {calcSettings, useCalcSettings} from '@/store/calculation';
 import {clearMawaqitCache} from '@/store/mawaqit_cache';
+import {
+  fetchMawaqitPrayerTimes,
+  MawaqitPrayerTimes,
+} from '@/services/mawaqit_service';
+import {getTime} from '@/utils/date';
 
 export function CalculationSettings(props: IScrollViewProps) {
   const isMethodModified = useStore(
@@ -37,6 +44,12 @@ export function CalculationSettings(props: IScrollViewProps) {
   const [mawaqitEnabled, setMawaqitEnabled] = useCalcSettings('MAWAQIT_ENABLED');
   const [mawaqitUrl, setMawaqitUrl] = useCalcSettings('MAWAQIT_URL');
   const [mawaqitUrlInvalid, setMawaqitUrlInvalid] = useState(false);
+  const [mawaqitTestLoading, setMawaqitTestLoading] = useState(false);
+  const [mawaqitTestResult, setMawaqitTestResult] = useState<{
+    success: boolean;
+    times?: MawaqitPrayerTimes;
+    error?: string;
+  } | null>(null);
 
   const isValidMawaqitUrl = useCallback((url: string): boolean => {
     if (!url) return true; // Empty is valid (will disable Mawaqit)
@@ -74,9 +87,50 @@ export function CalculationSettings(props: IScrollViewProps) {
 
       // Clear cache when URL changes to force re-fetch
       clearMawaqitCache();
+
+      // Clear test result when URL changes
+      setMawaqitTestResult(null);
     },
     [setMawaqitUrl, isValidMawaqitUrl],
   );
+
+  const handleMawaqitTest = useCallback(async () => {
+    if (!mawaqitUrl || mawaqitUrlInvalid) {
+      setMawaqitTestResult({
+        success: false,
+        error: t`Please enter a valid Mawaqit URL first`,
+      });
+      return;
+    }
+
+    setMawaqitTestLoading(true);
+    setMawaqitTestResult(null);
+
+    try {
+      const today = new Date();
+      const times = await fetchMawaqitPrayerTimes(mawaqitUrl, today);
+
+      if (times) {
+        setMawaqitTestResult({
+          success: true,
+          times,
+        });
+      } else {
+        setMawaqitTestResult({
+          success: false,
+          error: t`Failed to fetch prayer times. Check the URL and try again.`,
+        });
+      }
+    } catch (error) {
+      setMawaqitTestResult({
+        success: false,
+        error:
+          error instanceof Error ? error.message : t`Unknown error occurred`,
+      });
+    } finally {
+      setMawaqitTestLoading(false);
+    }
+  }, [mawaqitUrl, mawaqitUrlInvalid]);
 
   const getMethodLabel = useCallback(
     (entry: CalculationMethodEntry) => {
@@ -196,6 +250,44 @@ export function CalculationSettings(props: IScrollViewProps) {
                 <FormControl.HelperText>
                   {t`Enter your mosque URL from mawaqit.net. Prayer times will be fetched from Mawaqit. If the fetch fails, the app will use the selected calculation method as fallback and retry later.`}
                 </FormControl.HelperText>
+                <Button
+                  mt="3"
+                  onPress={handleMawaqitTest}
+                  isDisabled={mawaqitTestLoading || !mawaqitUrl || mawaqitUrlInvalid}
+                  leftIcon={mawaqitTestLoading ? <Spinner size="sm" color="white" /> : undefined}>
+                  {mawaqitTestLoading ? t`Testing...` : t`Test Connection`}
+                </Button>
+                {mawaqitTestResult && (
+                  <Box
+                    mt="3"
+                    p="3"
+                    borderRadius="md"
+                    bg={mawaqitTestResult.success ? 'green.100' : 'red.100'}
+                    _dark={{
+                      bg: mawaqitTestResult.success ? 'green.900' : 'red.900',
+                    }}>
+                    {mawaqitTestResult.success && mawaqitTestResult.times ? (
+                      <VStack space={1}>
+                        <Text
+                          fontWeight="bold"
+                          color="green.700"
+                          _dark={{color: 'green.300'}}>
+                          {t`Prayer times found:`}
+                        </Text>
+                        <Text>Fajr: {getTime(mawaqitTestResult.times.fajr)}</Text>
+                        <Text>Sunrise: {getTime(mawaqitTestResult.times.sunrise)}</Text>
+                        <Text>Dhuhr: {getTime(mawaqitTestResult.times.dhuhr)}</Text>
+                        <Text>Asr: {getTime(mawaqitTestResult.times.asr)}</Text>
+                        <Text>Maghrib: {getTime(mawaqitTestResult.times.maghrib)}</Text>
+                        <Text>Isha: {getTime(mawaqitTestResult.times.isha)}</Text>
+                      </VStack>
+                    ) : (
+                      <Text color="red.700" _dark={{color: 'red.300'}}>
+                        {mawaqitTestResult.error}
+                      </Text>
+                    )}
+                  </Box>
+                )}
               </VStack>
             )}
           </VStack>
