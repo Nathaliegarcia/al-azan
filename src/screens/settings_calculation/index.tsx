@@ -26,8 +26,9 @@ import {push} from '@/navigation/root_navigation';
 import {calcSettings, useCalcSettings} from '@/store/calculation';
 import {clearMawaqitCache} from '@/store/mawaqit_cache';
 import {
-  fetchMawaqitPrayerTimes,
+  fetchMawaqitPrayerTimesWithDetails,
   MawaqitPrayerTimes,
+  MawaqitFetchResult,
 } from '@/services/mawaqit_service';
 import {getTime} from '@/utils/date';
 
@@ -45,11 +46,7 @@ export function CalculationSettings(props: IScrollViewProps) {
   const [mawaqitUrl, setMawaqitUrl] = useCalcSettings('MAWAQIT_URL');
   const [mawaqitUrlInvalid, setMawaqitUrlInvalid] = useState(false);
   const [mawaqitTestLoading, setMawaqitTestLoading] = useState(false);
-  const [mawaqitTestResult, setMawaqitTestResult] = useState<{
-    success: boolean;
-    times?: MawaqitPrayerTimes;
-    error?: string;
-  } | null>(null);
+  const [mawaqitTestResult, setMawaqitTestResult] = useState<MawaqitFetchResult | null>(null);
 
   const isValidMawaqitUrl = useCallback((url: string): boolean => {
     if (!url) return true; // Empty is valid (will disable Mawaqit)
@@ -98,7 +95,7 @@ export function CalculationSettings(props: IScrollViewProps) {
     if (!mawaqitUrl || mawaqitUrlInvalid) {
       setMawaqitTestResult({
         success: false,
-        error: t`Please enter a valid Mawaqit URL first`,
+        methodResults: [{method: 'iCal', success: false, error: t`Please enter a valid Mawaqit URL first`}],
       });
       return;
     }
@@ -108,24 +105,16 @@ export function CalculationSettings(props: IScrollViewProps) {
 
     try {
       const today = new Date();
-      const times = await fetchMawaqitPrayerTimes(mawaqitUrl, today);
-
-      if (times) {
-        setMawaqitTestResult({
-          success: true,
-          times,
-        });
-      } else {
-        setMawaqitTestResult({
-          success: false,
-          error: t`Failed to fetch prayer times. Check the URL and try again.`,
-        });
-      }
+      const result = await fetchMawaqitPrayerTimesWithDetails(mawaqitUrl, today);
+      setMawaqitTestResult(result);
     } catch (error) {
       setMawaqitTestResult({
         success: false,
-        error:
-          error instanceof Error ? error.message : t`Unknown error occurred`,
+        methodResults: [{
+          method: 'iCal',
+          success: false,
+          error: error instanceof Error ? error.message : t`Unknown error occurred`,
+        }],
       });
     } finally {
       setMawaqitTestLoading(false);
@@ -272,7 +261,7 @@ export function CalculationSettings(props: IScrollViewProps) {
                           fontWeight="bold"
                           color="green.700"
                           _dark={{color: 'green.300'}}>
-                          {t`Prayer times found:`}
+                          {t`Prayer times found via ${mawaqitTestResult.successMethod}:`}
                         </Text>
                         <Text>Fajr: {getTime(mawaqitTestResult.times.fajr)}</Text>
                         <Text>Sunrise: {getTime(mawaqitTestResult.times.sunrise)}</Text>
@@ -282,9 +271,31 @@ export function CalculationSettings(props: IScrollViewProps) {
                         <Text>Isha: {getTime(mawaqitTestResult.times.isha)}</Text>
                       </VStack>
                     ) : (
-                      <Text color="red.700" _dark={{color: 'red.300'}}>
-                        {mawaqitTestResult.error}
-                      </Text>
+                      <VStack space={2}>
+                        <Text
+                          fontWeight="bold"
+                          color="red.700"
+                          _dark={{color: 'red.300'}}>
+                          {t`All fetch methods failed:`}
+                        </Text>
+                        {mawaqitTestResult.methodResults.map((result, index) => (
+                          <Box key={index} pl="2">
+                            <Text
+                              fontWeight="semibold"
+                              color="red.600"
+                              _dark={{color: 'red.400'}}>
+                              {result.method}:
+                            </Text>
+                            <Text
+                              fontSize="sm"
+                              color="red.600"
+                              _dark={{color: 'red.400'}}
+                              pl="2">
+                              {result.error || t`Unknown error`}
+                            </Text>
+                          </Box>
+                        ))}
+                      </VStack>
                     )}
                   </Box>
                 )}
