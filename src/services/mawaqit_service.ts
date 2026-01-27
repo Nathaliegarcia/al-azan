@@ -66,7 +66,11 @@ export type MawaqitFetchResult = {
 
 /**
  * Extract mosque UUID or slug from Mawaqit URL
- * @param url Full Mawaqit mosque URL (e.g., https://mawaqit.net/fr/m/mosquee-de-frejus)
+ * Supports various URL formats:
+ * - https://mawaqit.net/fr/m/mosquee-de-frejus
+ * - https://mawaqit.net/en/mosquee-de-frejus
+ * - https://mawaqit.net/mosquee-de-frejus
+ * @param url Full Mawaqit mosque URL
  * @returns Mosque identifier (UUID or slug)
  */
 function extractMosqueIdentifier(url: string): string | null {
@@ -74,13 +78,17 @@ function extractMosqueIdentifier(url: string): string | null {
     const urlObj = new URL(url);
     const pathParts = urlObj.pathname.split('/').filter(Boolean);
 
-    // Expected format: /[lang]/m/[mosque-identifier]
+    if (pathParts.length === 0) {
+      return null;
+    }
+
+    // If /m/ is in the path, get the part after it
     const mIndex = pathParts.indexOf('m');
     if (mIndex !== -1 && pathParts[mIndex + 1]) {
       return pathParts[mIndex + 1];
     }
 
-    // Fallback: last part of the path
+    // Otherwise, use the last non-empty part of the path (the mosque slug)
     return pathParts[pathParts.length - 1] || null;
   } catch (error) {
     console.error('Invalid Mawaqit URL:', error);
@@ -463,6 +471,57 @@ async function fetchFromHtmlPage(
 }
 
 /**
+ * Extract a JSON object from a string starting at a given position
+ * Uses bracket counting to properly handle nested objects
+ * @param str The string to extract from
+ * @param startIndex The index of the opening brace
+ * @returns The extracted JSON string or null if invalid
+ */
+function extractJsonObject(str: string, startIndex: number): string | null {
+  if (str[startIndex] !== '{') {
+    return null;
+  }
+
+  let depth = 0;
+  let inString = false;
+  let escapeNext = false;
+
+  for (let i = startIndex; i < str.length; i++) {
+    const char = str[i];
+
+    if (escapeNext) {
+      escapeNext = false;
+      continue;
+    }
+
+    if (char === '\\' && inString) {
+      escapeNext = true;
+      continue;
+    }
+
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+
+    if (inString) {
+      continue;
+    }
+
+    if (char === '{') {
+      depth++;
+    } else if (char === '}') {
+      depth--;
+      if (depth === 0) {
+        return str.substring(startIndex, i + 1);
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
  * Parse Mawaqit HTML page to extract confData and prayer times
  * The page contains a JavaScript variable 'confData' with all prayer time information
  * @param html HTML content of the page
@@ -474,18 +533,53 @@ function parseHtmlPage(
   date: Date,
 ): FetchMethodResult {
   try {
-    // Extract the confData JavaScript object from the HTML
-    // It's defined as: let confData = {...};
-    const confDataMatch = html.match(/let\s+confData\s*=\s*(\{[\s\S]*?\});/);
-    if (!confDataMatch) {
+    // Find confData assignment in the HTML
+    // It can be defined as: let confData = {...}, var confData = {...}, or const confData = {...}
+    const confDataIndex = html.indexOf('confData');
+    if (confDataIndex === -1) {
       return {
         times: null,
         error: 'Could not find confData in HTML (page structure may have changed)',
       };
     }
 
+    // Find the opening brace after confData
+    const equalsIndex = html.indexOf('=', confDataIndex);
+    if (equalsIndex === -1) {
+      return {
+        times: null,
+        error: 'Could not find confData assignment in HTML',
+      };
+    }
+
+    const braceIndex = html.indexOf('{', equalsIndex);
+    if (braceIndex === -1) {
+      return {
+        times: null,
+        error: 'Could not find confData object in HTML',
+      };
+    }
+
+    // Extract the JSON object using bracket counting
+    const jsonStr = extractJsonObject(html, braceIndex);
+    if (!jsonStr) {
+      return {
+        times: null,
+        error: 'Failed to extract confData JSON (unbalanced braces)',
+      };
+    }
+
     // Parse the JSON data
-    const confData = JSON.parse(confDataMatch[1]);
+    let confData;
+    try {
+      confData = JSON.parse(jsonStr);
+    } catch (parseError) {
+      const errorMsg = parseError instanceof Error ? parseError.message : String(parseError);
+      return {
+        times: null,
+        error: `Failed to parse confData JSON: ${errorMsg}`,
+      };
+    }
 
     // Extract prayer times from calendar
     // calendar is an array of 12 months (0-indexed)

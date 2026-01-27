@@ -52,10 +52,10 @@ export function CalculationSettings(props: IScrollViewProps) {
     if (!url) return true; // Empty is valid (will disable Mawaqit)
     try {
       const urlObj = new URL(url);
-      // Check if it's a mawaqit.net URL and has the expected structure
+      // Check if it's a mawaqit.net URL with a path (mosque identifier)
       return (
         urlObj.hostname.includes('mawaqit.net') &&
-        urlObj.pathname.includes('/m/')
+        urlObj.pathname.length > 1 // Has something after the initial /
       );
     } catch {
       return false;
