@@ -60,7 +60,7 @@ react {
 def enableSeparateBuildPerCPUArchitecture = project.getProperties().get("enableSeparateBuildPerCPUArchitecture", "true") == "true"
 
 /** should we build a universal apk as well ? */
-def buildUniversalApk = project.getProperties().get("buildUniversalApk", "false") == "true";
+def buildUniversalApk = project.getProperties().get("buildUniversalApk", false) == "true";
 
 // for package size on github
 def legacyPackaging = project.getProperties().get("useLegacyPackaging", false) == "true";
