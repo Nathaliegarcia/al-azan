@@ -75,7 +75,7 @@ jobs:
     - name: build Apk files
       run: |
         cd android
-        ./gradlew --no-daemon :app:assembleRelease -PnoSign -PuseLegacyPackaging=true
+        ./gradlew --no-daemon :app:assembleRelease -PnoSign -PuseLegacyPackaging=true -PenableSeparateBuildPerCPUArchitecture=false
 
     - name: Upload unsigned APK as artifact
       uses: actions/upload-artifact@v4
