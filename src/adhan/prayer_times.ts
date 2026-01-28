@@ -25,7 +25,10 @@ import {
 import {calcSettings, CalcSettingsStore} from '@/store/calculation';
 import {addDays, getDayBeginning, WeekDayIndex} from '@/utils/date';
 import {isRamadan} from '@/utils/ramadan';
-import {fetchMawaqitPrayerTimes} from '@/services/mawaqit_service';
+import {
+  fetchMawaqitPrayerTimes,
+  getPrayerTimesFromStoredCalendar,
+} from '@/services/mawaqit_service';
 import {
   getCachedMawaqitPrayerTimes,
   cacheMawaqitPrayerTimes,
@@ -186,11 +189,18 @@ function getMawaqitPrayerTimesFromCache(
 
   const mosqueUrl = state.MAWAQIT_URL;
 
-  // Try to get from cache
+  // Try to get from daily cache first
   const cached = getCachedMawaqitPrayerTimes(date, mosqueUrl);
   if (cached) {
     // Convert to CachedPrayerTimes format with midnight/tahajjud
     return convertMawaqitToCachedPrayerTimes(cached, state);
+  }
+
+  // Try to get from stored calendar (offline fallback)
+  const storedTimes = getPrayerTimesFromStoredCalendar(date, mosqueUrl);
+  if (storedTimes) {
+    console.log('Mawaqit: Using stored calendar for prayer times');
+    return convertMawaqitToCachedPrayerTimes(storedTimes, state);
   }
 
   // Trigger background fetch if cache miss and should retry

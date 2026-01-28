@@ -4,6 +4,7 @@
  */
 
 import {Prayer} from '@/adhan';
+import {storage} from '@/store/mmkv';
 
 // Timeout for fetch requests (10 seconds)
 const FETCH_TIMEOUT_MS = 10000;
@@ -740,4 +741,224 @@ export async function fetchMawaqitPrayerTimes(
 ): Promise<MawaqitPrayerTimes | null> {
   const result = await fetchMawaqitPrayerTimesWithDetails(mosqueUrl, date);
   return result.times || null;
+}
+
+// ============================================================================
+// Calendar Storage - Store full year calendar for offline use
+// ============================================================================
+
+const MAWAQIT_CALENDAR_KEY = 'MAWAQIT_CALENDAR';
+
+/**
+ * Stored calendar data structure
+ * calendar[month][day] = [Fajr, Shuruq, Dhuhr, Asr, Maghrib, Isha]
+ */
+export type MawaqitCalendar = {
+  calendar: string[][][]; // [month][day][times]
+  mosqueUrl: string;
+  mosqueName?: string;
+  fetchedAt: number;
+};
+
+export type MawaqitCalendarFetchResult = {
+  success: boolean;
+  calendar?: MawaqitCalendar;
+  error?: string;
+};
+
+/**
+ * Fetch and extract the full calendar from Mawaqit HTML page
+ * @param mosqueUrl Mawaqit mosque URL
+ * @returns Calendar data or error
+ */
+export async function fetchMawaqitCalendar(
+  mosqueUrl: string,
+): Promise<MawaqitCalendarFetchResult> {
+  try {
+    const response = await fetchWithTimeout(mosqueUrl, {
+      headers: {
+        'User-Agent': 'Al-Azan-App/1.0',
+      },
+    });
+
+    if (!response.ok) {
+      return {
+        success: false,
+        error: `HTTP ${response.status}: ${response.statusText || 'Request failed'}`,
+      };
+    }
+
+    const html = await response.text();
+
+    // Find confData in the HTML
+    const confDataIndex = html.indexOf('confData');
+    if (confDataIndex === -1) {
+      return {
+        success: false,
+        error: 'Could not find confData in HTML',
+      };
+    }
+
+    const equalsIndex = html.indexOf('=', confDataIndex);
+    if (equalsIndex === -1) {
+      return {
+        success: false,
+        error: 'Could not find confData assignment',
+      };
+    }
+
+    const braceIndex = html.indexOf('{', equalsIndex);
+    if (braceIndex === -1) {
+      return {
+        success: false,
+        error: 'Could not find confData object',
+      };
+    }
+
+    const jsonStr = extractJsonObject(html, braceIndex);
+    if (!jsonStr) {
+      return {
+        success: false,
+        error: 'Failed to extract confData JSON',
+      };
+    }
+
+    let confData;
+    try {
+      confData = JSON.parse(jsonStr);
+    } catch (parseError) {
+      const errorMsg =
+        parseError instanceof Error ? parseError.message : String(parseError);
+      return {
+        success: false,
+        error: `Failed to parse confData: ${errorMsg}`,
+      };
+    }
+
+    if (!confData.calendar || !Array.isArray(confData.calendar)) {
+      return {
+        success: false,
+        error: 'Invalid calendar data in confData',
+      };
+    }
+
+    return {
+      success: true,
+      calendar: {
+        calendar: confData.calendar,
+        mosqueUrl,
+        mosqueName: confData.name || confData.mosqueName,
+        fetchedAt: Date.now(),
+      },
+    };
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    return {
+      success: false,
+      error: errorMsg,
+    };
+  }
+}
+
+/**
+ * Store the Mawaqit calendar to persistent storage
+ * @param calendar Calendar data to store
+ */
+export function storeMawaqitCalendar(calendar: MawaqitCalendar): void {
+  try {
+    storage.set(MAWAQIT_CALENDAR_KEY, JSON.stringify(calendar));
+    console.log('Mawaqit calendar stored successfully');
+  } catch (error) {
+    console.error('Error storing Mawaqit calendar:', error);
+  }
+}
+
+/**
+ * Load the Mawaqit calendar from persistent storage
+ * @returns Stored calendar or null if not found
+ */
+export function loadMawaqitCalendar(): MawaqitCalendar | null {
+  try {
+    const stored = storage.getString(MAWAQIT_CALENDAR_KEY);
+    if (!stored) {
+      return null;
+    }
+    return JSON.parse(stored);
+  } catch (error) {
+    console.error('Error loading Mawaqit calendar:', error);
+    return null;
+  }
+}
+
+/**
+ * Clear the stored Mawaqit calendar
+ */
+export function clearMawaqitCalendar(): void {
+  try {
+    storage.delete(MAWAQIT_CALENDAR_KEY);
+  } catch (error) {
+    console.error('Error clearing Mawaqit calendar:', error);
+  }
+}
+
+/**
+ * Get prayer times from stored calendar for a specific date
+ * @param date Date to get prayer times for
+ * @param mosqueUrl Current mosque URL (to validate stored calendar)
+ * @returns Prayer times or null if not available
+ */
+export function getPrayerTimesFromStoredCalendar(
+  date: Date,
+  mosqueUrl: string,
+): MawaqitPrayerTimes | null {
+  try {
+    const calendar = loadMawaqitCalendar();
+    if (!calendar) {
+      return null;
+    }
+
+    // Validate mosque URL matches
+    if (calendar.mosqueUrl !== mosqueUrl) {
+      console.log('Stored calendar is for a different mosque');
+      return null;
+    }
+
+    const month = date.getMonth();
+    const day = date.getDate();
+
+    if (!calendar.calendar[month] || !calendar.calendar[month][day]) {
+      return null;
+    }
+
+    const dayTimes = calendar.calendar[month][day];
+    if (!Array.isArray(dayTimes) || dayTimes.length < 6) {
+      return null;
+    }
+
+    const [fajrStr, shuruqStr, dhuhrStr, asrStr, maghribStr, ishaStr] = dayTimes;
+
+    const fajr = parseTimeString(fajrStr, date);
+    const sunrise = parseTimeString(shuruqStr, date);
+    const dhuhr = parseTimeString(dhuhrStr, date);
+    const asr = parseTimeString(asrStr, date);
+    const maghrib = parseTimeString(maghribStr, date);
+    const isha = parseTimeString(ishaStr, date);
+
+    if (!fajr || !sunrise || !dhuhr || !asr || !maghrib || !isha) {
+      return null;
+    }
+
+    return {
+      fajr,
+      sunrise,
+      dhuhr,
+      asr,
+      maghrib,
+      isha,
+      date,
+    };
+  } catch (error) {
+    console.error('Error getting prayer times from stored calendar:', error);
+    return null;
+  }
 }

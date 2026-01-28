@@ -25,11 +25,14 @@ import {SafeArea} from '@/components/safe_area';
 import {push} from '@/navigation/root_navigation';
 import {calcSettings, useCalcSettings} from '@/store/calculation';
 import {clearMawaqitCache} from '@/store/mawaqit_cache';
+import {clearCache as clearCalcCache} from '@/store/adhan_calc_cache';
 import {
   fetchMawaqitPrayerTimesWithDetails,
-  MawaqitPrayerTimes,
+  fetchMawaqitCalendar,
+  storeMawaqitCalendar,
   MawaqitFetchResult,
 } from '@/services/mawaqit_service';
+import {ToastAndroid} from 'react-native';
 import {getTime} from '@/utils/date';
 
 export function CalculationSettings(props: IScrollViewProps) {
@@ -47,6 +50,7 @@ export function CalculationSettings(props: IScrollViewProps) {
   const [mawaqitUrlInvalid, setMawaqitUrlInvalid] = useState(false);
   const [mawaqitTestLoading, setMawaqitTestLoading] = useState(false);
   const [mawaqitTestResult, setMawaqitTestResult] = useState<MawaqitFetchResult | null>(null);
+  const [mawaqitCalendarLoading, setMawaqitCalendarLoading] = useState(false);
 
   const isValidMawaqitUrl = useCallback((url: string): boolean => {
     if (!url) return true; // Empty is valid (will disable Mawaqit)
@@ -65,9 +69,10 @@ export function CalculationSettings(props: IScrollViewProps) {
   const handleMawaqitEnabledChange = useCallback(
     (value: boolean) => {
       setMawaqitEnabled(value);
+      // Clear both caches to force recalculation with new settings
+      clearMawaqitCache();
+      clearCalcCache();
       if (!value) {
-        // Clear cache when disabling Mawaqit
-        clearMawaqitCache();
         setMawaqitUrlInvalid(false);
       }
     },
@@ -82,8 +87,9 @@ export function CalculationSettings(props: IScrollViewProps) {
       // Validate URL format
       setMawaqitUrlInvalid(!isValidMawaqitUrl(trimmedUrl));
 
-      // Clear cache when URL changes to force re-fetch
+      // Clear both caches when URL changes to force re-fetch
       clearMawaqitCache();
+      clearCalcCache();
 
       // Clear test result when URL changes
       setMawaqitTestResult(null);
@@ -120,6 +126,31 @@ export function CalculationSettings(props: IScrollViewProps) {
       setMawaqitTestLoading(false);
     }
   }, [mawaqitUrl, mawaqitUrlInvalid]);
+
+  const handleDownloadCalendar = useCallback(async () => {
+    if (!mawaqitUrl) {
+      return;
+    }
+
+    setMawaqitCalendarLoading(true);
+
+    try {
+      const result = await fetchMawaqitCalendar(mawaqitUrl);
+      if (result.success && result.calendar) {
+        storeMawaqitCalendar(result.calendar);
+        ToastAndroid.show(t`Calendar downloaded successfully`, ToastAndroid.SHORT);
+      } else {
+        ToastAndroid.show(result.error || t`Failed to download calendar`, ToastAndroid.LONG);
+      }
+    } catch (error) {
+      ToastAndroid.show(
+        error instanceof Error ? error.message : t`Failed to download calendar`,
+        ToastAndroid.LONG,
+      );
+    } finally {
+      setMawaqitCalendarLoading(false);
+    }
+  }, [mawaqitUrl]);
 
   const getMethodLabel = useCallback(
     (entry: CalculationMethodEntry) => {
@@ -298,6 +329,16 @@ export function CalculationSettings(props: IScrollViewProps) {
                       </VStack>
                     )}
                   </Box>
+                )}
+                {mawaqitTestResult?.success && (
+                  <Button
+                    mt="3"
+                    variant="outline"
+                    onPress={handleDownloadCalendar}
+                    isDisabled={mawaqitCalendarLoading}
+                    leftIcon={mawaqitCalendarLoading ? <Spinner size="sm" /> : undefined}>
+                    {mawaqitCalendarLoading ? t`Downloading...` : t`Download Full Calendar`}
+                  </Button>
                 )}
               </VStack>
             )}
