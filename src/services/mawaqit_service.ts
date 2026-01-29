@@ -4,6 +4,7 @@
  */
 
 import {Prayer} from '@/adhan';
+import {storage} from '@/store/mmkv';
 
 // Timeout for fetch requests (10 seconds)
 const FETCH_TIMEOUT_MS = 10000;
@@ -49,9 +50,28 @@ export type MawaqitPrayerTimes = {
   date: Date;
 };
 
+export type MawaqitFetchMethod = 'iCal' | 'JSON API' | 'HTML';
+
+export type MawaqitMethodResult = {
+  method: MawaqitFetchMethod;
+  success: boolean;
+  error?: string;
+};
+
+export type MawaqitFetchResult = {
+  success: boolean;
+  times?: MawaqitPrayerTimes;
+  successMethod?: MawaqitFetchMethod;
+  methodResults: MawaqitMethodResult[];
+};
+
 /**
  * Extract mosque UUID or slug from Mawaqit URL
- * @param url Full Mawaqit mosque URL (e.g., https://mawaqit.net/fr/m/mosquee-de-frejus)
+ * Supports various URL formats:
+ * - https://mawaqit.net/fr/m/mosquee-de-frejus
+ * - https://mawaqit.net/en/mosquee-de-frejus
+ * - https://mawaqit.net/mosquee-de-frejus
+ * @param url Full Mawaqit mosque URL
  * @returns Mosque identifier (UUID or slug)
  */
 function extractMosqueIdentifier(url: string): string | null {
@@ -59,13 +79,17 @@ function extractMosqueIdentifier(url: string): string | null {
     const urlObj = new URL(url);
     const pathParts = urlObj.pathname.split('/').filter(Boolean);
 
-    // Expected format: /[lang]/m/[mosque-identifier]
+    if (pathParts.length === 0) {
+      return null;
+    }
+
+    // If /m/ is in the path, get the part after it
     const mIndex = pathParts.indexOf('m');
     if (mIndex !== -1 && pathParts[mIndex + 1]) {
       return pathParts[mIndex + 1];
     }
 
-    // Fallback: last part of the path
+    // Otherwise, use the last non-empty part of the path (the mosque slug)
     return pathParts[pathParts.length - 1] || null;
   } catch (error) {
     console.error('Invalid Mawaqit URL:', error);
@@ -95,21 +119,28 @@ function parseTimeString(timeStr: string, date: Date): Date | null {
   }
 }
 
+type FetchMethodResult = {
+  times: MawaqitPrayerTimes | null;
+  error?: string;
+};
+
 /**
  * Fetch prayer times from Mawaqit using the iCal endpoint
  * @param mosqueUrl Mawaqit mosque URL
  * @param date Date to fetch prayer times for
- * @returns Prayer times or null if fetch fails
+ * @returns Prayer times and error details
  */
 async function fetchFromIcalEndpoint(
   mosqueUrl: string,
   date: Date,
-): Promise<MawaqitPrayerTimes | null> {
+): Promise<FetchMethodResult> {
   try {
     const mosqueId = extractMosqueIdentifier(mosqueUrl);
     if (!mosqueId) {
-      console.error('Could not extract mosque identifier from URL:', mosqueUrl);
-      return null;
+      return {
+        times: null,
+        error: 'Could not extract mosque identifier from URL',
+      };
     }
 
     // Try the ical endpoint
@@ -122,15 +153,27 @@ async function fetchFromIcalEndpoint(
     });
 
     if (!response.ok) {
-      console.error('Mawaqit iCal fetch failed:', response.status);
-      return null;
+      return {
+        times: null,
+        error: `HTTP ${response.status}: ${response.statusText || 'Request failed'}`,
+      };
     }
 
     const icalData = await response.text();
-    return parseIcalData(icalData, date);
+    const times = parseIcalData(icalData, date);
+    if (!times) {
+      return {
+        times: null,
+        error: 'Failed to parse iCal data (missing prayer times for date)',
+      };
+    }
+    return {times};
   } catch (error) {
-    console.error('Error fetching from Mawaqit iCal:', error);
-    return null;
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    return {
+      times: null,
+      error: errorMsg,
+    };
   }
 }
 
@@ -243,16 +286,20 @@ function parseIcalDateTime(dtString: string): Date | null {
  * Fetch prayer times from Mawaqit using JSON API
  * @param mosqueUrl Mawaqit mosque URL
  * @param date Date to fetch prayer times for
- * @returns Prayer times or null if fetch fails
+ * @returns Prayer times and error details
  */
 async function fetchFromJsonApi(
   mosqueUrl: string,
   date: Date,
-): Promise<MawaqitPrayerTimes | null> {
+): Promise<FetchMethodResult> {
+  const errors: string[] = [];
   try {
     const mosqueId = extractMosqueIdentifier(mosqueUrl);
     if (!mosqueId) {
-      return null;
+      return {
+        times: null,
+        error: 'Could not extract mosque identifier from URL',
+      };
     }
 
     // Try different API endpoint patterns
@@ -273,18 +320,28 @@ async function fetchFromJsonApi(
         if (response.ok) {
           const data = await response.json();
           const parsed = parseJsonApiResponse(data, date);
-          if (parsed) return parsed;
+          if (parsed) return {times: parsed};
+          errors.push(`Endpoint ${apiUrl}: Failed to parse response`);
+        } else {
+          errors.push(`Endpoint ${apiUrl}: HTTP ${response.status}`);
         }
       } catch (error) {
-        // Try next endpoint
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        errors.push(`Endpoint ${apiUrl}: ${errorMsg}`);
         continue;
       }
     }
 
-    return null;
+    return {
+      times: null,
+      error: errors.join('; '),
+    };
   } catch (error) {
-    console.error('Error fetching from Mawaqit JSON API:', error);
-    return null;
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    return {
+      times: null,
+      error: errorMsg,
+    };
   }
 }
 
@@ -379,12 +436,12 @@ function parsePrayerTimesObject(
  * This is the most reliable method as it uses the same data the website displays
  * @param mosqueUrl Mawaqit mosque URL
  * @param date Date to fetch prayer times for
- * @returns Prayer times or null if fetch fails
+ * @returns Prayer times and error details
  */
 async function fetchFromHtmlPage(
   mosqueUrl: string,
   date: Date,
-): Promise<MawaqitPrayerTimes | null> {
+): Promise<FetchMethodResult> {
   try {
     const response = await fetchWithTimeout(mosqueUrl, {
       headers: {
@@ -393,16 +450,76 @@ async function fetchFromHtmlPage(
     });
 
     if (!response.ok) {
-      console.error('Mawaqit HTML fetch failed:', response.status);
-      return null;
+      return {
+        times: null,
+        error: `HTTP ${response.status}: ${response.statusText || 'Request failed'}`,
+      };
     }
 
     const html = await response.text();
-    return parseHtmlPage(html, date);
+    const result = parseHtmlPage(html, date);
+    if (!result.times) {
+      return result;
+    }
+    return {times: result.times};
   } catch (error) {
-    console.error('Error fetching from Mawaqit HTML page:', error);
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    return {
+      times: null,
+      error: errorMsg,
+    };
+  }
+}
+
+/**
+ * Extract a JSON object from a string starting at a given position
+ * Uses bracket counting to properly handle nested objects
+ * @param str The string to extract from
+ * @param startIndex The index of the opening brace
+ * @returns The extracted JSON string or null if invalid
+ */
+function extractJsonObject(str: string, startIndex: number): string | null {
+  if (str[startIndex] !== '{') {
     return null;
   }
+
+  let depth = 0;
+  let inString = false;
+  let escapeNext = false;
+
+  for (let i = startIndex; i < str.length; i++) {
+    const char = str[i];
+
+    if (escapeNext) {
+      escapeNext = false;
+      continue;
+    }
+
+    if (char === '\\' && inString) {
+      escapeNext = true;
+      continue;
+    }
+
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+
+    if (inString) {
+      continue;
+    }
+
+    if (char === '{') {
+      depth++;
+    } else if (char === '}') {
+      depth--;
+      if (depth === 0) {
+        return str.substring(startIndex, i + 1);
+      }
+    }
+  }
+
+  return null;
 }
 
 /**
@@ -410,23 +527,60 @@ async function fetchFromHtmlPage(
  * The page contains a JavaScript variable 'confData' with all prayer time information
  * @param html HTML content of the page
  * @param date Date to extract prayer times for
- * @returns Prayer times or null if parsing fails
+ * @returns Prayer times and error details
  */
 function parseHtmlPage(
   html: string,
   date: Date,
-): MawaqitPrayerTimes | null {
+): FetchMethodResult {
   try {
-    // Extract the confData JavaScript object from the HTML
-    // It's defined as: let confData = {...};
-    const confDataMatch = html.match(/let\s+confData\s*=\s*(\{[\s\S]*?\});/);
-    if (!confDataMatch) {
-      console.error('Could not find confData in HTML');
-      return null;
+    // Find confData assignment in the HTML
+    // It can be defined as: let confData = {...}, var confData = {...}, or const confData = {...}
+    const confDataIndex = html.indexOf('confData');
+    if (confDataIndex === -1) {
+      return {
+        times: null,
+        error: 'Could not find confData in HTML (page structure may have changed)',
+      };
+    }
+
+    // Find the opening brace after confData
+    const equalsIndex = html.indexOf('=', confDataIndex);
+    if (equalsIndex === -1) {
+      return {
+        times: null,
+        error: 'Could not find confData assignment in HTML',
+      };
+    }
+
+    const braceIndex = html.indexOf('{', equalsIndex);
+    if (braceIndex === -1) {
+      return {
+        times: null,
+        error: 'Could not find confData object in HTML',
+      };
+    }
+
+    // Extract the JSON object using bracket counting
+    const jsonStr = extractJsonObject(html, braceIndex);
+    if (!jsonStr) {
+      return {
+        times: null,
+        error: 'Failed to extract confData JSON (unbalanced braces)',
+      };
     }
 
     // Parse the JSON data
-    const confData = JSON.parse(confDataMatch[1]);
+    let confData;
+    try {
+      confData = JSON.parse(jsonStr);
+    } catch (parseError) {
+      const errorMsg = parseError instanceof Error ? parseError.message : String(parseError);
+      return {
+        times: null,
+        error: `Failed to parse confData JSON: ${errorMsg}`,
+      };
+    }
 
     // Extract prayer times from calendar
     // calendar is an array of 12 months (0-indexed)
@@ -434,23 +588,29 @@ function parseHtmlPage(
     // Each day is an array: [Fajr, Shuruq, Dhuhr, Asr, Maghrib, Isha]
     const calendar = confData.calendar;
     if (!calendar || !Array.isArray(calendar)) {
-      console.error('Invalid calendar data in confData');
-      return null;
+      return {
+        times: null,
+        error: 'Invalid calendar data in confData',
+      };
     }
 
     const month = date.getMonth(); // 0-indexed (0 = January)
     const day = date.getDate(); // 1-indexed
 
     if (!calendar[month] || !calendar[month][day]) {
-      console.error(`No prayer times found for month ${month + 1}, day ${day}`);
-      return null;
+      return {
+        times: null,
+        error: `No prayer times found for ${date.toLocaleDateString()}`,
+      };
     }
 
     const dayTimes = calendar[month][day];
     // dayTimes format: [Fajr, Shuruq, Dhuhr, Asr, Maghrib, Isha]
     if (!Array.isArray(dayTimes) || dayTimes.length < 6) {
-      console.error('Invalid day times format');
-      return null;
+      return {
+        times: null,
+        error: 'Invalid day times format in calendar',
+      };
     }
 
     const [fajrStr, shuruqStr, dhuhrStr, asrStr, maghribStr, ishaStr] = dayTimes;
@@ -464,23 +624,108 @@ function parseHtmlPage(
     const isha = parseTimeString(ishaStr, date);
 
     if (!fajr || !sunrise || !dhuhr || !asr || !maghrib || !isha) {
-      console.error('Failed to parse one or more prayer times from HTML');
-      return null;
+      return {
+        times: null,
+        error: `Failed to parse time strings: [${[fajrStr, shuruqStr, dhuhrStr, asrStr, maghribStr, ishaStr].join(', ')}]`,
+      };
     }
 
     return {
-      fajr,
-      sunrise,
-      dhuhr,
-      asr,
-      maghrib,
-      isha,
-      date,
+      times: {
+        fajr,
+        sunrise,
+        dhuhr,
+        asr,
+        maghrib,
+        isha,
+        date,
+      },
     };
   } catch (error) {
-    console.error('Error parsing Mawaqit HTML page:', error);
-    return null;
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    return {
+      times: null,
+      error: `Parse error: ${errorMsg}`,
+    };
   }
+}
+
+/**
+ * Fetch prayer times from Mawaqit for a specific date with detailed results
+ * Tries multiple methods: iCal, JSON API, HTML parsing
+ * @param mosqueUrl Mawaqit mosque URL
+ * @param date Date to fetch prayer times for
+ * @returns Detailed result including method-by-method outcomes
+ */
+export async function fetchMawaqitPrayerTimesWithDetails(
+  mosqueUrl: string,
+  date: Date,
+): Promise<MawaqitFetchResult> {
+  const methodResults: MawaqitMethodResult[] = [];
+
+  if (!mosqueUrl) {
+    return {
+      success: false,
+      methodResults: [{method: 'iCal', success: false, error: 'Mawaqit URL not configured'}],
+    };
+  }
+
+  // Try iCal endpoint first
+  const icalResult = await fetchFromIcalEndpoint(mosqueUrl, date);
+  methodResults.push({
+    method: 'iCal',
+    success: !!icalResult.times,
+    error: icalResult.error,
+  });
+  if (icalResult.times) {
+    console.log('Mawaqit: Successfully fetched from iCal endpoint');
+    return {
+      success: true,
+      times: icalResult.times,
+      successMethod: 'iCal',
+      methodResults,
+    };
+  }
+
+  // Fallback to JSON API
+  const jsonResult = await fetchFromJsonApi(mosqueUrl, date);
+  methodResults.push({
+    method: 'JSON API',
+    success: !!jsonResult.times,
+    error: jsonResult.error,
+  });
+  if (jsonResult.times) {
+    console.log('Mawaqit: Successfully fetched from JSON API');
+    return {
+      success: true,
+      times: jsonResult.times,
+      successMethod: 'JSON API',
+      methodResults,
+    };
+  }
+
+  // Final fallback: Parse HTML page directly
+  const htmlResult = await fetchFromHtmlPage(mosqueUrl, date);
+  methodResults.push({
+    method: 'HTML',
+    success: !!htmlResult.times,
+    error: htmlResult.error,
+  });
+  if (htmlResult.times) {
+    console.log('Mawaqit: Successfully fetched from HTML page');
+    return {
+      success: true,
+      times: htmlResult.times,
+      successMethod: 'HTML',
+      methodResults,
+    };
+  }
+
+  console.error('All Mawaqit fetch methods failed');
+  return {
+    success: false,
+    methodResults,
+  };
 }
 
 /**
@@ -494,32 +739,226 @@ export async function fetchMawaqitPrayerTimes(
   mosqueUrl: string,
   date: Date,
 ): Promise<MawaqitPrayerTimes | null> {
-  if (!mosqueUrl) {
-    console.error('Mawaqit URL not configured');
+  const result = await fetchMawaqitPrayerTimesWithDetails(mosqueUrl, date);
+  return result.times || null;
+}
+
+// ============================================================================
+// Calendar Storage - Store full year calendar for offline use
+// ============================================================================
+
+const MAWAQIT_CALENDAR_KEY = 'MAWAQIT_CALENDAR';
+
+/**
+ * Stored calendar data structure
+ * calendar[month][day] = [Fajr, Shuruq, Dhuhr, Asr, Maghrib, Isha]
+ */
+export type MawaqitCalendar = {
+  calendar: string[][][]; // [month][day][times]
+  mosqueUrl: string;
+  mosqueName?: string;
+  fetchedAt: number;
+};
+
+export type MawaqitCalendarFetchResult = {
+  success: boolean;
+  calendar?: MawaqitCalendar;
+  error?: string;
+};
+
+/**
+ * Fetch and extract the full calendar from Mawaqit HTML page
+ * @param mosqueUrl Mawaqit mosque URL
+ * @returns Calendar data or error
+ */
+export async function fetchMawaqitCalendar(
+  mosqueUrl: string,
+): Promise<MawaqitCalendarFetchResult> {
+  try {
+    const response = await fetchWithTimeout(mosqueUrl, {
+      headers: {
+        'User-Agent': 'Al-Azan-App/1.0',
+      },
+    });
+
+    if (!response.ok) {
+      return {
+        success: false,
+        error: `HTTP ${response.status}: ${response.statusText || 'Request failed'}`,
+      };
+    }
+
+    const html = await response.text();
+
+    // Find confData in the HTML
+    const confDataIndex = html.indexOf('confData');
+    if (confDataIndex === -1) {
+      return {
+        success: false,
+        error: 'Could not find confData in HTML',
+      };
+    }
+
+    const equalsIndex = html.indexOf('=', confDataIndex);
+    if (equalsIndex === -1) {
+      return {
+        success: false,
+        error: 'Could not find confData assignment',
+      };
+    }
+
+    const braceIndex = html.indexOf('{', equalsIndex);
+    if (braceIndex === -1) {
+      return {
+        success: false,
+        error: 'Could not find confData object',
+      };
+    }
+
+    const jsonStr = extractJsonObject(html, braceIndex);
+    if (!jsonStr) {
+      return {
+        success: false,
+        error: 'Failed to extract confData JSON',
+      };
+    }
+
+    let confData;
+    try {
+      confData = JSON.parse(jsonStr);
+    } catch (parseError) {
+      const errorMsg =
+        parseError instanceof Error ? parseError.message : String(parseError);
+      return {
+        success: false,
+        error: `Failed to parse confData: ${errorMsg}`,
+      };
+    }
+
+    if (!confData.calendar || !Array.isArray(confData.calendar)) {
+      return {
+        success: false,
+        error: 'Invalid calendar data in confData',
+      };
+    }
+
+    return {
+      success: true,
+      calendar: {
+        calendar: confData.calendar,
+        mosqueUrl,
+        mosqueName: confData.name || confData.mosqueName,
+        fetchedAt: Date.now(),
+      },
+    };
+  } catch (error) {
+    const errorMsg = error instanceof Error ? error.message : String(error);
+    return {
+      success: false,
+      error: errorMsg,
+    };
+  }
+}
+
+/**
+ * Store the Mawaqit calendar to persistent storage
+ * @param calendar Calendar data to store
+ */
+export function storeMawaqitCalendar(calendar: MawaqitCalendar): void {
+  try {
+    storage.set(MAWAQIT_CALENDAR_KEY, JSON.stringify(calendar));
+    console.log('Mawaqit calendar stored successfully');
+  } catch (error) {
+    console.error('Error storing Mawaqit calendar:', error);
+  }
+}
+
+/**
+ * Load the Mawaqit calendar from persistent storage
+ * @returns Stored calendar or null if not found
+ */
+export function loadMawaqitCalendar(): MawaqitCalendar | null {
+  try {
+    const stored = storage.getString(MAWAQIT_CALENDAR_KEY);
+    if (!stored) {
+      return null;
+    }
+    return JSON.parse(stored);
+  } catch (error) {
+    console.error('Error loading Mawaqit calendar:', error);
     return null;
   }
+}
 
-  // Try iCal endpoint first
-  let times = await fetchFromIcalEndpoint(mosqueUrl, date);
-  if (times) {
-    console.log('Mawaqit: Successfully fetched from iCal endpoint');
-    return times;
+/**
+ * Clear the stored Mawaqit calendar
+ */
+export function clearMawaqitCalendar(): void {
+  try {
+    storage.delete(MAWAQIT_CALENDAR_KEY);
+  } catch (error) {
+    console.error('Error clearing Mawaqit calendar:', error);
   }
+}
 
-  // Fallback to JSON API
-  times = await fetchFromJsonApi(mosqueUrl, date);
-  if (times) {
-    console.log('Mawaqit: Successfully fetched from JSON API');
-    return times;
+/**
+ * Get prayer times from stored calendar for a specific date
+ * @param date Date to get prayer times for
+ * @param mosqueUrl Current mosque URL (to validate stored calendar)
+ * @returns Prayer times or null if not available
+ */
+export function getPrayerTimesFromStoredCalendar(
+  date: Date,
+  mosqueUrl: string,
+): MawaqitPrayerTimes | null {
+  try {
+    const calendar = loadMawaqitCalendar();
+    if (!calendar) {
+      return null;
+    }
+
+    // Validate mosque URL matches
+    if (calendar.mosqueUrl !== mosqueUrl) {
+      console.log('Stored calendar is for a different mosque');
+      return null;
+    }
+
+    const month = date.getMonth();
+    const day = date.getDate();
+
+    if (!calendar.calendar[month] || !calendar.calendar[month][day]) {
+      return null;
+    }
+
+    const dayTimes = calendar.calendar[month][day];
+    if (!Array.isArray(dayTimes) || dayTimes.length < 6) {
+      return null;
+    }
+
+    const [fajrStr, shuruqStr, dhuhrStr, asrStr, maghribStr, ishaStr] = dayTimes;
+
+    const fajr = parseTimeString(fajrStr, date);
+    const sunrise = parseTimeString(shuruqStr, date);
+    const dhuhr = parseTimeString(dhuhrStr, date);
+    const asr = parseTimeString(asrStr, date);
+    const maghrib = parseTimeString(maghribStr, date);
+    const isha = parseTimeString(ishaStr, date);
+
+    if (!fajr || !sunrise || !dhuhr || !asr || !maghrib || !isha) {
+      return null;
+    }
+
+    return {
+      fajr,
+      sunrise,
+      dhuhr,
+      asr,
+      maghrib,
+      isha,
+      date,
+    };
+  } catch (error) {
+    console.error('Error getting prayer times from stored calendar:', error);
+    return null;
   }
-
-  // Final fallback: Parse HTML page directly
-  times = await fetchFromHtmlPage(mosqueUrl, date);
-  if (times) {
-    console.log('Mawaqit: Successfully fetched from HTML page');
-    return times;
-  }
-
-  console.error('All Mawaqit fetch methods failed');
-  return null;
 }

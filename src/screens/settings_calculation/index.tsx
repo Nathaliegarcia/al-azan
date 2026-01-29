@@ -10,6 +10,8 @@ import {
   Input,
   HStack,
   VStack,
+  Spinner,
+  Box,
 } from 'native-base';
 import {useCallback, useMemo, useState} from 'react';
 import {useStore} from 'zustand';
@@ -22,7 +24,17 @@ import {SafeArea} from '@/components/safe_area';
 
 import {push} from '@/navigation/root_navigation';
 import {calcSettings, useCalcSettings} from '@/store/calculation';
-import {clearMawaqitCache} from '@/store/mawaqit_cache';
+import {clearMawaqitCache, cacheMawaqitPrayerTimes} from '@/store/mawaqit_cache';
+import {clearCache as clearCalcCache} from '@/store/adhan_calc_cache';
+import {
+  fetchMawaqitPrayerTimesWithDetails,
+  fetchMawaqitCalendar,
+  storeMawaqitCalendar,
+  MawaqitFetchResult,
+} from '@/services/mawaqit_service';
+import {ToastAndroid} from 'react-native';
+import {saveJsonDocument} from '@/modules/activity';
+import {getTime} from '@/utils/date';
 
 export function CalculationSettings(props: IScrollViewProps) {
   const isMethodModified = useStore(
@@ -37,15 +49,18 @@ export function CalculationSettings(props: IScrollViewProps) {
   const [mawaqitEnabled, setMawaqitEnabled] = useCalcSettings('MAWAQIT_ENABLED');
   const [mawaqitUrl, setMawaqitUrl] = useCalcSettings('MAWAQIT_URL');
   const [mawaqitUrlInvalid, setMawaqitUrlInvalid] = useState(false);
+  const [mawaqitTestLoading, setMawaqitTestLoading] = useState(false);
+  const [mawaqitTestResult, setMawaqitTestResult] = useState<MawaqitFetchResult | null>(null);
+  const [mawaqitCalendarLoading, setMawaqitCalendarLoading] = useState(false);
 
   const isValidMawaqitUrl = useCallback((url: string): boolean => {
     if (!url) return true; // Empty is valid (will disable Mawaqit)
     try {
       const urlObj = new URL(url);
-      // Check if it's a mawaqit.net URL and has the expected structure
+      // Check if it's a mawaqit.net URL with a path (mosque identifier)
       return (
         urlObj.hostname.includes('mawaqit.net') &&
-        urlObj.pathname.includes('/m/')
+        urlObj.pathname.length > 1 // Has something after the initial /
       );
     } catch {
       return false;
@@ -55,9 +70,10 @@ export function CalculationSettings(props: IScrollViewProps) {
   const handleMawaqitEnabledChange = useCallback(
     (value: boolean) => {
       setMawaqitEnabled(value);
+      // Clear both caches to force recalculation with new settings
+      clearMawaqitCache();
+      clearCalcCache();
       if (!value) {
-        // Clear cache when disabling Mawaqit
-        clearMawaqitCache();
         setMawaqitUrlInvalid(false);
       }
     },
@@ -72,11 +88,90 @@ export function CalculationSettings(props: IScrollViewProps) {
       // Validate URL format
       setMawaqitUrlInvalid(!isValidMawaqitUrl(trimmedUrl));
 
-      // Clear cache when URL changes to force re-fetch
+      // Clear both caches when URL changes to force re-fetch
       clearMawaqitCache();
+      clearCalcCache();
+
+      // Clear test result when URL changes
+      setMawaqitTestResult(null);
     },
     [setMawaqitUrl, isValidMawaqitUrl],
   );
+
+  const handleMawaqitTest = useCallback(async () => {
+    if (!mawaqitUrl || mawaqitUrlInvalid) {
+      setMawaqitTestResult({
+        success: false,
+        methodResults: [{method: 'iCal', success: false, error: t`Please enter a valid Mawaqit URL first`}],
+      });
+      return;
+    }
+
+    setMawaqitTestLoading(true);
+    setMawaqitTestResult(null);
+
+    try {
+      const today = new Date();
+      const result = await fetchMawaqitPrayerTimesWithDetails(mawaqitUrl, today);
+      setMawaqitTestResult(result);
+
+      // Cache the result if successful so main screen can use it
+      if (result.success && result.times) {
+        cacheMawaqitPrayerTimes(today, result.times, mawaqitUrl);
+        // Clear calculation cache to force using Mawaqit times
+        clearCalcCache();
+      }
+    } catch (error) {
+      setMawaqitTestResult({
+        success: false,
+        methodResults: [{
+          method: 'iCal',
+          success: false,
+          error: error instanceof Error ? error.message : t`Unknown error occurred`,
+        }],
+      });
+    } finally {
+      setMawaqitTestLoading(false);
+    }
+  }, [mawaqitUrl, mawaqitUrlInvalid]);
+
+  const handleDownloadCalendar = useCallback(async () => {
+    if (!mawaqitUrl) {
+      return;
+    }
+
+    setMawaqitCalendarLoading(true);
+
+    try {
+      const result = await fetchMawaqitCalendar(mawaqitUrl);
+      if (result.success && result.calendar) {
+        // Store in app's internal storage for offline use
+        storeMawaqitCalendar(result.calendar);
+        // Clear calculation cache to use the new calendar
+        clearCalcCache();
+
+        // Generate filename from mosque name or URL
+        const mosqueName = result.calendar.mosqueName || 'mawaqit';
+        const safeName = mosqueName.replace(/[^a-zA-Z0-9-_]/g, '_').toLowerCase();
+        const filename = `${safeName}_calendar.json`;
+
+        // Save as downloadable file using system file picker
+        const jsonData = JSON.stringify(result.calendar, null, 2);
+        saveJsonDocument(jsonData, filename);
+
+        ToastAndroid.show(t`Calendar saved for offline use`, ToastAndroid.SHORT);
+      } else {
+        ToastAndroid.show(result.error || t`Failed to download calendar`, ToastAndroid.LONG);
+      }
+    } catch (error) {
+      ToastAndroid.show(
+        error instanceof Error ? error.message : t`Failed to download calendar`,
+        ToastAndroid.LONG,
+      );
+    } finally {
+      setMawaqitCalendarLoading(false);
+    }
+  }, [mawaqitUrl]);
 
   const getMethodLabel = useCallback(
     (entry: CalculationMethodEntry) => {
@@ -196,6 +291,76 @@ export function CalculationSettings(props: IScrollViewProps) {
                 <FormControl.HelperText>
                   {t`Enter your mosque URL from mawaqit.net. Prayer times will be fetched from Mawaqit. If the fetch fails, the app will use the selected calculation method as fallback and retry later.`}
                 </FormControl.HelperText>
+                <Button
+                  mt="3"
+                  onPress={handleMawaqitTest}
+                  isDisabled={mawaqitTestLoading || !mawaqitUrl || mawaqitUrlInvalid}
+                  leftIcon={mawaqitTestLoading ? <Spinner size="sm" color="white" /> : undefined}>
+                  {mawaqitTestLoading ? t`Testing...` : t`Test Connection`}
+                </Button>
+                {mawaqitTestResult && (
+                  <Box
+                    mt="3"
+                    p="3"
+                    borderRadius="md"
+                    bg={mawaqitTestResult.success ? 'green.100' : 'red.100'}
+                    _dark={{
+                      bg: mawaqitTestResult.success ? 'green.900' : 'red.900',
+                    }}>
+                    {mawaqitTestResult.success && mawaqitTestResult.times ? (
+                      <VStack space={1}>
+                        <Text
+                          fontWeight="bold"
+                          color="green.700"
+                          _dark={{color: 'green.300'}}>
+                          {t`Prayer times found via ${mawaqitTestResult.successMethod}:`}
+                        </Text>
+                        <Text>Fajr: {getTime(mawaqitTestResult.times.fajr)}</Text>
+                        <Text>Sunrise: {getTime(mawaqitTestResult.times.sunrise)}</Text>
+                        <Text>Dhuhr: {getTime(mawaqitTestResult.times.dhuhr)}</Text>
+                        <Text>Asr: {getTime(mawaqitTestResult.times.asr)}</Text>
+                        <Text>Maghrib: {getTime(mawaqitTestResult.times.maghrib)}</Text>
+                        <Text>Isha: {getTime(mawaqitTestResult.times.isha)}</Text>
+                      </VStack>
+                    ) : (
+                      <VStack space={2}>
+                        <Text
+                          fontWeight="bold"
+                          color="red.700"
+                          _dark={{color: 'red.300'}}>
+                          {t`All fetch methods failed:`}
+                        </Text>
+                        {mawaqitTestResult.methodResults.map((result, index) => (
+                          <Box key={index} pl="2">
+                            <Text
+                              fontWeight="semibold"
+                              color="red.600"
+                              _dark={{color: 'red.400'}}>
+                              {result.method}:
+                            </Text>
+                            <Text
+                              fontSize="sm"
+                              color="red.600"
+                              _dark={{color: 'red.400'}}
+                              pl="2">
+                              {result.error || t`Unknown error`}
+                            </Text>
+                          </Box>
+                        ))}
+                      </VStack>
+                    )}
+                  </Box>
+                )}
+                {mawaqitTestResult?.success && (
+                  <Button
+                    mt="3"
+                    variant="outline"
+                    onPress={handleDownloadCalendar}
+                    isDisabled={mawaqitCalendarLoading}
+                    leftIcon={mawaqitCalendarLoading ? <Spinner size="sm" /> : undefined}>
+                    {mawaqitCalendarLoading ? t`Downloading...` : t`Download Full Calendar`}
+                  </Button>
+                )}
               </VStack>
             )}
           </VStack>

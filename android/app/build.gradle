@@ -57,7 +57,7 @@ react {
  * use App Bundles (https://developer.android.com/guide/app-bundle/)
  * and want to have separate APKs to upload to the Play Store.
  */
-def enableSeparateBuildPerCPUArchitecture = true
+def enableSeparateBuildPerCPUArchitecture = project.getProperties().get("enableSeparateBuildPerCPUArchitecture", "true") == "true"
 
 /** should we build a universal apk as well ? */
 def buildUniversalApk = project.getProperties().get("buildUniversalApk", false) == "true";
