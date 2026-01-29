@@ -24,7 +24,7 @@ import {SafeArea} from '@/components/safe_area';
 
 import {push} from '@/navigation/root_navigation';
 import {calcSettings, useCalcSettings} from '@/store/calculation';
-import {clearMawaqitCache} from '@/store/mawaqit_cache';
+import {clearMawaqitCache, cacheMawaqitPrayerTimes} from '@/store/mawaqit_cache';
 import {clearCache as clearCalcCache} from '@/store/adhan_calc_cache';
 import {
   fetchMawaqitPrayerTimesWithDetails,
@@ -33,6 +33,7 @@ import {
   MawaqitFetchResult,
 } from '@/services/mawaqit_service';
 import {ToastAndroid} from 'react-native';
+import {saveJsonDocument} from '@/modules/activity';
 import {getTime} from '@/utils/date';
 
 export function CalculationSettings(props: IScrollViewProps) {
@@ -113,6 +114,13 @@ export function CalculationSettings(props: IScrollViewProps) {
       const today = new Date();
       const result = await fetchMawaqitPrayerTimesWithDetails(mawaqitUrl, today);
       setMawaqitTestResult(result);
+
+      // Cache the result if successful so main screen can use it
+      if (result.success && result.times) {
+        cacheMawaqitPrayerTimes(today, result.times, mawaqitUrl);
+        // Clear calculation cache to force using Mawaqit times
+        clearCalcCache();
+      }
     } catch (error) {
       setMawaqitTestResult({
         success: false,
@@ -137,8 +145,21 @@ export function CalculationSettings(props: IScrollViewProps) {
     try {
       const result = await fetchMawaqitCalendar(mawaqitUrl);
       if (result.success && result.calendar) {
+        // Store in app's internal storage for offline use
         storeMawaqitCalendar(result.calendar);
-        ToastAndroid.show(t`Calendar downloaded successfully`, ToastAndroid.SHORT);
+        // Clear calculation cache to use the new calendar
+        clearCalcCache();
+
+        // Generate filename from mosque name or URL
+        const mosqueName = result.calendar.mosqueName || 'mawaqit';
+        const safeName = mosqueName.replace(/[^a-zA-Z0-9-_]/g, '_').toLowerCase();
+        const filename = `${safeName}_calendar.json`;
+
+        // Save as downloadable file using system file picker
+        const jsonData = JSON.stringify(result.calendar, null, 2);
+        saveJsonDocument(jsonData, filename);
+
+        ToastAndroid.show(t`Calendar saved for offline use`, ToastAndroid.SHORT);
       } else {
         ToastAndroid.show(result.error || t`Failed to download calendar`, ToastAndroid.LONG);
       }
