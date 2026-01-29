@@ -393,6 +393,13 @@ export function getPrayerTimes(date: Date) {
   const options = getPrayerTimesOptionsFromSettings();
   if (!options) return;
 
+  // Priority 1: Check Mawaqit if enabled (daily cache + stored calendar)
+  const mawaqitTimes = getMawaqitPrayerTimesFromCache(date);
+  if (mawaqitTimes) {
+    return mawaqitTimes;
+  }
+
+  // Priority 2: Fallback to calculated times from cache
   return getCachedPrayerTimes(date);
 }
 
