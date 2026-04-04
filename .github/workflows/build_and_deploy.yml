@@ -77,13 +77,6 @@ jobs:
         cd android
         ./gradlew --no-daemon :app:assembleRelease -PnoSign -PuseLegacyPackaging=true -PenableSeparateBuildPerCPUArchitecture=false
 
-    - name: Upload unsigned APK as artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: unsigned-apk
-        path: android/app/build/outputs/apk/release/*.apk
-        retention-days: 30
-
     - name: Sign Apk files
       if: ${{ github.event_name == 'release' || github.event_name == 'pull_request' }}
       uses: r0adkll/sign-android-release@v1.0.4
@@ -99,83 +92,16 @@ jobs:
 
     - name: Upload signed APK as artifact
       if: ${{ github.event_name == 'release' || github.event_name == 'pull_request' }}
+      id: upload-signed-apk
       uses: actions/upload-artifact@v4
       with:
         name: signed-apk
         path: android/app/build/outputs/apk/release/*signed.apk
         retention-days: 90
 
-    - name: Release Apk files on GitHub
-      if: ${{ github.event_name == 'release' }}
-      uses: ncipollo/release-action@v1
-      with:
-        prerelease: true
-        omitBody: true
-        omitBodyDuringUpdate: true
-        omitName: true
-        allowUpdates: true
-        replacesArtifacts: true
-        updateOnlyUnreleased: true
-        artifacts: android/app/build/outputs/apk/release/*signed.apk
-    
-    - name: Remove uploaded APK files
+    - name: Add signed APK link to summary
+      if: ${{ github.event_name == 'release' || github.event_name == 'pull_request' }}
       run: |
-        rm -rf ./android/app/build/outputs/apk/release
-        df -h
-
-    - name: build Bundle
-      run: |
-        cd android
-        ./gradlew --no-daemon :app:bundleRelease -PnoSign
-
-    - name: Upload unsigned Bundle as artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: unsigned-bundle
-        path: android/app/build/outputs/bundle/release/*.aab
-        retention-days: 30
-
-    - name: Sign App Bundle
-      if: ${{ github.event_name == 'release' }}
-      uses: r0adkll/sign-android-release@v1.0.4
-      with:
-        releaseDirectory: android/app/build/outputs/bundle/release
-        signingKeyBase64: ${{ secrets.ANDROID_SIGNING_KEY }}
-        alias: ${{ secrets.ANDROID_ALIAS }}
-        keyStorePassword: ${{ secrets.ANDROID_KEY_STORE_PASSWORD }}
-        keyPassword: ${{ secrets.ANDROID_KEY_PASSWORD }}
-      env:
-        BUILD_TOOLS_VERSION: "34.0.0"
-
-    - name: Upload signed Bundle as artifact
-      if: ${{ github.event_name == 'release' }}
-      uses: actions/upload-artifact@v4
-      with:
-        name: signed-bundle
-        path: android/app/build/outputs/bundle/release/*.aab
-        retention-days: 90
-
-    - name: Release bundle on GitHub
-      if: ${{ github.event_name == 'release' }}
-      uses: ncipollo/release-action@v1
-      with:
-        prerelease: true
-        omitBody: true
-        omitBodyDuringUpdate: true
-        omitName: true
-        allowUpdates: true
-        replacesArtifacts: true
-        updateOnlyUnreleased: true
-        artifacts: android/app/build/outputs/bundle/release/*.aab
-
-    - name: Push to Play Store
-      if: ${{ github.event_name == 'release' && !contains(github.ref, '-rc') }}
-      uses: r0adkll/upload-google-play@v1
-      with:
-        serviceAccountJsonPlainText: ${{ secrets.SERVICE_ACCOUNT_JSON }}
-        packageName: com.github.meypod.al_azan
-        releaseFiles: android/app/build/outputs/bundle/release/*.aab
-        track: internal
-        status: draft
-      #  changesNotSentForReview: true
-        
+        echo "## 📦 Signed APK" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "✅ **[Download Signed APK](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts/${{ steps.upload-signed-apk.outputs.artifact-id }})**" >> $GITHUB_STEP_SUMMARY
